@@ -149,7 +149,11 @@ class GaussCtrlPipeline(VanillaPipeline):
                 langsam_obj = self.config.langsam_obj
                 langsam_rgb_pil = Image.fromarray((rendered_rgb.cpu().numpy() * 255).astype(np.uint8))
                 masks, _, _, _ = self.langsam.predict(langsam_rgb_pil, langsam_obj)
-                mask_npy = masks.clone().cpu().numpy()[0] * 1
+                try:
+                    mask_npy = masks.clone().cpu().numpy()[0] * 1
+                except:
+                    # There is a chance that nothing is detected
+                    mask_npy = None
 
             if self.config.langsam_obj != "":
                 self.update_datasets(cam_idx, rendered_rgb.cpu(), rendered_depth, latent, mask_npy)
