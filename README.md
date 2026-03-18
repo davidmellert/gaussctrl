@@ -30,9 +30,12 @@
 ![teaser](./assets/teaser.png)
 
 ## ✨ News
+- [3.18.2026] Nerfstudio, gsplat, LangSAM installations are updated and a docker environment is supported for easier repo reproduction. 
 - [9.4.2024] Our original results utilise stable-diffusion-v1-5 from runwayml for editing, which is now unavailable. Please change the diffusion checkpoint to other available models, e.g. `CompVis/stable-diffusion-v1-4`, by using `--pipeline.diffusion_ckpt "CompVis/stable-diffusion-v1-4"`. Reproduce our original results by using the checkpoint `--pipeline.diffusion_ckpt "jinggogogo/gaussctrl-sd15"` 
 
-## ⚙️ Installation
+## ⚙️ Installation [Updated & Tested Mar 2026]
+
+### 1️⃣ Conda Installation
 
 - Tested on CUDA11.8 + Ubuntu22.04 + NeRFStudio1.0.0 (NVIDIA RTX A5000 24G)
 
@@ -42,7 +45,7 @@ git clone https://github.com/ActiveVisionLab/gaussctrl.git
 cd gaussctrl
 ```
 
-### 1. NeRFStudio and Lang-SAM
+#### 1. NeRFStudio and Lang-SAM
 
 ```bash
 conda create -n gaussctrl python=3.8
@@ -53,30 +56,70 @@ conda install cuda -c nvidia/label/cuda-11.8.0
 GaussCtrl is built upon NeRFStudio, follow [this link](https://docs.nerf.studio/quickstart/installation.html) to install NeRFStudio first. If you are failing to build tiny-cuda-nn, try building from scratch, see [here](https://github.com/NVlabs/tiny-cuda-nn/?tab=readme-ov-file#compilation-windows--linux). We recommend using NeRFStudio v1.0.0 with gsplat v0.1.3. 
 
 ```bash
+# Install torch and tinycudann
+pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+
+# Install nerfstudio
 pip install nerfstudio==1.0.0
 
-# Try either of these two if one is not working
-pip install gsplat==0.1.2
+# Update gsplat version for gc_model.py
 pip install gsplat==0.1.3
+pip install -r requirements.txt
+
+pip install "huggingface_hub<0.24"
 ```
 
 Install Lang-SAM for mask extraction. 
 
 ```bash
-pip install -U git+https://github.com/luca-medeiros/lang-segment-anything.git
+cd ..
 
-pip install -r requirements.txt
+# Install the old version LangSAM used for this repo
+git clone https://github.com/luca-medeiros/lang-segment-anything && cd lang-segment-anything
+# Switch branch
+git checkout fix-no_detection
+
+# Install LangSAM
+pip install --no-deps --no-build-isolation .
+
+# Install Dependencies
+pip install groundingdino-py
+pip install segment-anything
 ```
 
-### 2. Install GaussCtrl
+#### 2. Install GaussCtrl
 ```bash 
 pip install -e .
 ```
 
-### 3. Verify the install
+#### 3. Verify the install
 ```bash
 ns-train -h
 ```
+
+### 2️⃣ Use Docker Image
+
+If above does not fix your environment issues, please try to directly pull the docker image for our environment. 
+
+1. Install [Docker](https://www.docker.com/) on your machine
+2. Pull the environment from our image and start a docker container.
+
+```bash
+docker pull jingwu2121/gaussctrl:latest
+docker run -it --gpus all --shm-size=16g \
+  -p 7007:7007 \
+  -v /path/to/local/data:/workspace/gaussctrl \
+  jingwu2121/gaussctrl:latest /bin/bash
+```
+3. gaussctrl conda environment is already installed inside the docker container. 
+
+```bash
+conda activate gaussctrl
+
+cd /workspace/gaussctrl
+```
+4. Start reproducing our results
 
 ## 🗄️ Data
 
