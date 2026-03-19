@@ -53,8 +53,7 @@ conda activate gaussctrl
 conda install cuda -c nvidia/label/cuda-11.8.0
 ```
 
-GaussCtrl is built upon NeRFStudio, follow [this link](https://docs.nerf.studio/quickstart/installation.html) to install NeRFStudio first. If you are failing to build tiny-cuda-nn, try building from scratch, see [here](https://github.com/NVlabs/tiny-cuda-nn/?tab=readme-ov-file#compilation-windows--linux). We recommend using NeRFStudio v1.0.0 with gsplat v0.1.3. 
-
+Install dependencies for NerfStudio 
 ```bash
 # Install torch and tinycudann
 pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
@@ -98,6 +97,9 @@ pip install -e .
 ns-train -h
 ```
 
+GaussCtrl is built upon NeRFStudio, refer to [this link](https://docs.nerf.studio/quickstart/installation.html) for more details on installing and setting up NeRFStudio. If you are failing to build tiny-cuda-nn, try building from scratch, see [here](https://github.com/NVlabs/tiny-cuda-nn/?tab=readme-ov-file#compilation-windows--linux). We recommend using NeRFStudio v1.0.0 with gsplat v0.1.3. 
+
+
 ### 2️⃣ Use Docker Image
 
 If above does not fix your environment issues, please try to directly pull the docker image for our environment. 
@@ -120,6 +122,7 @@ conda activate gaussctrl
 cd /workspace/gaussctrl
 ```
 4. Start reproducing our results
+
 
 ## 🗄️ Data
 
