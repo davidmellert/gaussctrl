@@ -109,7 +109,7 @@ If above does not fix your environment issues, please try to directly pull the d
 docker pull jingwu2121/gaussctrl:latest
 docker run -it --gpus all --shm-size=16g \
   -p 7007:7007 \
-  -v /path/to/local/data:/workspace/gaussctrl \
+  -v /path/to/gaussctrl/in/local/machine:/workspace/gaussctrl \
   jingwu2121/gaussctrl:latest /bin/bash
 ```
 3. gaussctrl conda environment is already installed inside the docker container. 
