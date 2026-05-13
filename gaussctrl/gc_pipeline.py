@@ -203,8 +203,9 @@ class GaussCtrlPipeline(VanillaPipeline):
             
         ref_disparities = np.concatenate(ref_disparity_list, axis=0)
         ref_z0s = np.concatenate(ref_z0_list, axis=0)
-        ref_disparity_torch = torch.from_numpy(ref_disparities.copy()).to(torch.float16).to(self.pipe_device)
-        ref_z0_torch = torch.from_numpy(ref_z0s.copy()).to(torch.float16).to(self.pipe_device)
+        # keep reference tensors on CPU (move to GPU per-chunk to save persistent VRAM)
+        ref_disparity_torch = torch.from_numpy(ref_disparities.copy()).to(torch.float16)
+        ref_z0_torch = torch.from_numpy(ref_z0s.copy()).to(torch.float16)
 
         # Edit images in chunk
         for idx in range(0, len(self.datamanager.train_data), self.chunk_size): 
@@ -217,14 +218,22 @@ class GaussCtrlPipeline(VanillaPipeline):
 
             depth_images = [self.depth2disparity(current_data['depth_image']) for current_data in chunked_data]
             disparities = np.concatenate(depth_images, axis=0)
-            disparities_torch = torch.from_numpy(disparities.copy()).to(torch.float16).to(self.pipe_device)
+            # create per-chunk tensors on CPU and move to GPU only for the pipe call
+            disparities_torch = torch.from_numpy(disparities.copy()).to(torch.float16)
 
             z_0_images = [current_data['z_0_image'] for current_data in chunked_data] # list of np array
             z0s = np.concatenate(z_0_images, axis=0)
-            latents_torch = torch.from_numpy(z0s.copy()).to(torch.float16).to(self.pipe_device)
+            latents_torch = torch.from_numpy(z0s.copy()).to(torch.float16)
 
-            disp_ctrl_chunk = torch.concatenate((ref_disparity_torch, disparities_torch), dim=0)
-            latents_chunk = torch.concatenate((ref_z0_torch, latents_torch), dim=0)
+            # concatenate on CPU then move the smaller combined tensors to GPU
+            disp_ctrl_chunk = torch.concatenate((ref_disparity_torch, disparities_torch), dim=0).to(self.pipe_device)
+            latents_chunk = torch.concatenate((ref_z0_torch, latents_torch), dim=0).to(self.pipe_device)
+
+            # make sure CUDA has room before calling the pipe
+            try:
+                utils.free_cuda_memory()
+            except Exception:
+                pass
             
             chunk_edited = self.pipe(
                                 prompt=[self.positive_prompt] * (self.num_ref_views+len(chunked_data)),
