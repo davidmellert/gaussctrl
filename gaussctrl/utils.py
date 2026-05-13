@@ -225,16 +225,19 @@ def free_cuda_memory():
     """
     try:
         gc.collect()
+        print("Called gc.collect() to free memory.")
     except Exception:
         print("Warning: gc.collect() failed, memory may not be freed.")
         pass
     try:
         torch.cuda.empty_cache()
+        print("Called torch.cuda.empty_cache() to free memory.")
     except Exception:
         print("Warning: torch.cuda.empty_cache() failed.")
         pass
     try:
         torch.cuda.reset_peak_memory_stats()
+        print("Called torch.cuda.reset_peak_memory_stats() to free memory.")
     except Exception:
         print("Warning: torch.cuda.reset_peak_memory_stats() failed.")
         pass

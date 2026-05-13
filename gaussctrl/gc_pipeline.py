@@ -111,6 +111,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         try:
             self.pipe.enable_attention_slicing()
         except Exception:
+            CONSOLE.print("Warning: enable_attention_slicing() failed, VRAM may be high. Install the latest version of diffusers for this feature.", style="bold red")
             pass
 
         # Use xformers memory-efficient attention for the VAE and any attention
