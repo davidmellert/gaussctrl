@@ -101,6 +101,17 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.pipe = StableDiffusionControlNetPipeline.from_pretrained(self.config.diffusion_ckpt, controlnet=controlnet).to(self.device).to(torch.float16)
         self.pipe.to(self.pipe_device)
 
+        # Memory-saving options: slice attention and attempt CPU offload if available
+        try:
+            self.pipe.enable_attention_slicing()
+        except Exception:
+            pass
+        try:
+            # requires accelerate; wrapped in try/except to be safe
+            self.pipe.enable_model_cpu_offload()
+        except Exception:
+            pass
+
         added_prompt = 'best quality, extremely detailed'
         self.positive_prompt = self.edit_prompt + ', ' + added_prompt
         self.positive_reverse_prompt = self.reverse_prompt + ', ' + added_prompt
@@ -171,6 +182,11 @@ class GaussCtrlPipeline(VanillaPipeline):
                         processor=utils.CrossViewAttnProcessor(self_attn_coeff=0,
                         unet_chunk_size=2)) 
         CONSOLE.print("Done Resetting Attention Processor", style="bold blue")
+        # Ensure any leftover GPU memory from previous steps is freed before editing
+        try:
+            utils.free_cuda_memory()
+        except Exception:
+            pass
         
         print("#############################")
         CONSOLE.print("Start Editing: ", style="bold yellow")
@@ -221,7 +237,30 @@ class GaussCtrlPipeline(VanillaPipeline):
                                 eta=self.eta,
                                 output_type='pt',
                             ).images[self.num_ref_views:]
-            chunk_edited = chunk_edited.cpu() 
+            chunk_edited = chunk_edited.cpu()
+
+            # free intermediate GPU memory for this chunk (caller should del large objects first)
+            try:
+                del latents_chunk
+            except Exception:
+                pass
+            try:
+                del disp_ctrl_chunk
+            except Exception:
+                pass
+            try:
+                del latents_torch
+            except Exception:
+                pass
+            try:
+                del disparities_torch
+            except Exception:
+                pass
+            try:
+                del z0s
+            except Exception:
+                pass
+            utils.free_cuda_memory()
 
             # Insert edited images back to train data for training
             for local_idx, edited_image in enumerate(chunk_edited):

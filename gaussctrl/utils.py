@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import gc
 from torchvision.transforms import Resize, InterpolationMode
 from einops import rearrange
 import glob
@@ -131,3 +132,23 @@ class CrossViewAttnProcessor:
         hidden_states = hidden_states / attn.rescale_output_factor
 
         return hidden_states
+
+
+def free_cuda_memory():
+    """Try to free CUDA memory: collect garbage and empty the CUDA cache.
+
+    Call this after deleting large model or tensor references in the caller.
+    It cannot delete caller names, so caller should `del` large objects first.
+    """
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        pass
