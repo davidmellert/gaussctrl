@@ -69,7 +69,7 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """Batch size for image editing. Keep at 1 for GPUs with ≤ 12 GB VRAM."""
     attention_chunk_size: int = 256
     """Query-token chunk size for custom attention. Lower uses less VRAM but is slower."""
-    offload_model_during_edit: bool = True
+    offload_model_during_edit: bool = False
     """Move the Gaussian model to CPU while Stable Diffusion edits images."""
     unload_diffusion_after_edit: bool = True
     """Delete the diffusion pipeline after editing to free VRAM before Gaussian training."""
