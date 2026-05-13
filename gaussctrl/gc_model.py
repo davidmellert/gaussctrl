@@ -106,7 +106,7 @@ class GaussCtrlModel(SplatfactoModel):
         R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
         T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
         # flip the z and y axes to align with gsplat conventions
-        R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
+        R_edit = torch.diag(torch.tensor([1, -1, -1], device=R.device, dtype=R.dtype))
         R = R @ R_edit
         # analytic matrix inverse to get world2camera matrix
         R_inv = R.T
@@ -121,7 +121,7 @@ class GaussCtrlModel(SplatfactoModel):
         fovy = 2 * math.atan(camera.height / (2 * camera.fy))
         W, H = int(camera.width.item()), int(camera.height.item())
         self.last_size = (H, W)
-        projmat = projection_matrix(0.001, 1000, fovx, fovy, device=self.device)
+        projmat = projection_matrix(0.001, 1000, fovx, fovy, device=R.device)
         BLOCK_X, BLOCK_Y = 16, 16
         tile_bounds = (
             int((W + BLOCK_X - 1) // BLOCK_X),
@@ -208,7 +208,7 @@ class GaussCtrlModel(SplatfactoModel):
                 torch.sigmoid(opacities_crop),
                 H,
                 W,
-                background=torch.zeros(3, device=self.device),
+                background=torch.zeros(3, device=depths.device),
             )[..., 0:1]  # type: ignore
             depth_im[alpha > 0] = depth_im[alpha > 0] / alpha[alpha > 0]
             depth_im[alpha == 0] = 1000

@@ -158,6 +158,11 @@ class GaussCtrlPipeline(VanillaPipeline):
         except Exception:
             pass
 
+    def _move_gaussian_model(self, device) -> None:
+        self._model.to(device)
+        if hasattr(self._model, "device"):
+            self._model.device = torch.device(device)
+
     def render_reverse(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
         for cam_idx in range(len(self.datamanager.cameras)):
@@ -225,7 +230,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         # leave CUDA until training resumes.
         model_offloaded = False
         if self.config.offload_model_during_edit:
-            self._model.to('cpu')
+            self._move_gaussian_model('cpu')
             model_offloaded = True
         utils.free_cuda_memory()
         self._log_cuda_memory("After editing cleanup")
@@ -324,7 +329,7 @@ class GaussCtrlPipeline(VanillaPipeline):
             if self.config.unload_diffusion_after_edit:
                 del self.pipe
             if model_offloaded:
-                self._model.to(self.device)
+                self._move_gaussian_model(self.device)
             utils.free_cuda_memory()
             self._log_cuda_memory("After edit_images cleanup")
         print("#############################")
