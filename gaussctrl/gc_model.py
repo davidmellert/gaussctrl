@@ -54,6 +54,15 @@ class GaussCtrlModel(SplatfactoModel):
 
     config: GaussCtrlModelConfig
 
+    def _empty_outputs(self, camera: Cameras, background: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Return a full output dict when no gaussians contribute to the view."""
+        height = int(camera.height.item())
+        width = int(camera.width.item())
+        rgb = background.repeat(height, width, 1)
+        depth = torch.full((height, width, 1), 1000.0, device=background.device, dtype=background.dtype)
+        accumulation = torch.zeros((height, width, 1), device=background.device, dtype=background.dtype)
+        return {"rgb": rgb, "depth": depth, "accumulation": accumulation}
+
     def get_outputs(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
@@ -88,7 +97,7 @@ class GaussCtrlModel(SplatfactoModel):
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
             if crop_ids.sum() == 0:
-                return {"rgb": background.repeat(int(camera.height.item()), int(camera.width.item()), 1)}
+                return self._empty_outputs(camera, background)
         else:
             crop_ids = None
         camera_downscale = self._get_downscale_factor()
@@ -153,7 +162,8 @@ class GaussCtrlModel(SplatfactoModel):
             tile_bounds,
         )  # type: ignore
         if (self.radii).sum() == 0:
-            return {"rgb": background.repeat(int(camera.height.item()), int(camera.width.item()), 1)}
+            camera.rescale_output_resolution(camera_downscale)
+            return self._empty_outputs(camera, background)
 
         # Important to allow xys grads to populate properly
         if self.training:
@@ -215,7 +225,10 @@ class GaussCtrlModel(SplatfactoModel):
         """
         assert camera is not None, "must provide camera to gaussian model"
         self.set_crop(obb_box)
+        was_training = self.training
         self.training = False
-        outs = self.get_outputs(camera.to(self.device))
-        self.training = True
+        try:
+            outs = self.get_outputs(camera.to(self.device))
+        finally:
+            self.training = was_training
         return outs  # type: ignore
