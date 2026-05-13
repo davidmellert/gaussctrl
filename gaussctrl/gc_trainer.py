@@ -35,6 +35,7 @@ from nerfstudio.utils.misc import step_check
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.viewer_legacy.server.viewer_state import ViewerLegacyState
 from nerfstudio.viewer.viewer import Viewer as ViewerState
+from gaussctrl import utils
 
 TRAIN_INTERATION_OUTPUT = Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
 TORCH_DEVICE = str
@@ -55,6 +56,14 @@ class GaussCtrlTrainer(Trainer):
         # reset button
         self.reset_button = ViewerButton(name="Reset Button", cb_hook=self.reset_callback)
 
+    def _move_optimizer_state(self, device: torch.device) -> None:
+        """Move loaded optimizer tensors out of the way during render/edit."""
+        for optimizer in self.optimizers.optimizers.values():
+            for state in optimizer.state.values():
+                for key, value in state.items():
+                    if torch.is_tensor(value):
+                        state[key] = value.to(device)
+
     def setup(self, test_mode: Literal["test", "val", "inference"] = "val") -> None:
         """Setup the Trainer by calling other setup functions.
 
@@ -73,9 +82,15 @@ class GaussCtrlTrainer(Trainer):
         )
         self.optimizers = self.setup_optimizers()
         self._load_checkpoint()
-        self.pipeline.render_reverse()
-        if self.pipeline.test_mode == "val":
-            self.pipeline.edit_images()
+        self._move_optimizer_state(torch.device("cpu"))
+        utils.free_cuda_memory()
+        try:
+            self.pipeline.render_reverse()
+            if self.pipeline.test_mode == "val":
+                self.pipeline.edit_images()
+        finally:
+            self._move_optimizer_state(self.device)
+            utils.free_cuda_memory()
 
         # set up viewer if enabled
         viewer_log_path = self.base_dir / self.config.viewer.relative_log_filename

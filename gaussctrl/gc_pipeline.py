@@ -67,6 +67,10 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """Inference steps"""
     chunk_size: int = 1
     """Batch size for image editing. Keep at 1 for GPUs with ≤ 12 GB VRAM."""
+    attention_chunk_size: int = 256
+    """Query-token chunk size for custom attention. Lower uses less VRAM but is slower."""
+    offload_model_during_edit: bool = True
+    """Move the Gaussian model to CPU while Stable Diffusion edits images."""
     ref_view_num: int = 4
     """Number of reference frames"""
     diffusion_ckpt: str = 'CompVis/stable-diffusion-v1-4'
@@ -146,6 +150,12 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.eta = 0.0
         self.chunk_size = self.config.chunk_size
 
+    def _log_cuda_memory(self, prefix: str) -> None:
+        try:
+            CONSOLE.print(utils.cuda_memory_summary(prefix), style="dim")
+        except Exception:
+            pass
+
     def render_reverse(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
         for cam_idx in range(len(self.datamanager.cameras)):
@@ -186,6 +196,13 @@ class GaussCtrlPipeline(VanillaPipeline):
                 self.update_datasets(cam_idx, rendered_rgb.cpu(), rendered_depth, latent, mask_npy)
             else: 
                 self.update_datasets(cam_idx, rendered_rgb.cpu(), rendered_depth, latent, None)
+
+            del current_cam, rendered_image, rendered_rgb, rendered_depth, init_latent, disparity, latent
+            utils.free_cuda_memory()
+
+        self.pipe.to('cpu')
+        utils.free_cuda_memory()
+        self._log_cuda_memory("After render_reverse cleanup")
         
     def edit_images(self):
         '''Edit images with ControlNet and AttnAlign''' 
@@ -193,23 +210,24 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.pipe.scheduler = self.ddim_scheduler
         self.pipe.unet.set_attn_processor(
                         processor=utils.CrossViewAttnProcessor(self_attn_coeff=0.6,
-                        unet_chunk_size=2))
+                        unet_chunk_size=2,
+                        attention_chunk_size=self.config.attention_chunk_size))
         self.pipe.controlnet.set_attn_processor(
                         processor=utils.CrossViewAttnProcessor(self_attn_coeff=0,
-                        unet_chunk_size=2)) 
+                        unet_chunk_size=2,
+                        attention_chunk_size=self.config.attention_chunk_size))
         CONSOLE.print("Done Resetting Attention Processor", style="bold blue")
-        # Ensure any leftover GPU memory from previous steps is freed before editing
-        try:
-            utils.free_cuda_memory()
-        except Exception:
-            pass
+        self._log_cuda_memory("Before editing cleanup")
 
-        # Move the heavy pipeline modules to CPU and only load to GPU per-chunk
-        try:
-            self.pipe.to('cpu')
-            utils.free_cuda_memory()
-        except Exception:
-            pass
+        # Stable Diffusion does all editing work here; the Gaussian model can
+        # leave CUDA until training resumes.
+        self.pipe.to('cpu')
+        model_offloaded = False
+        if self.config.offload_model_during_edit:
+            self._model.to('cpu')
+            model_offloaded = True
+        utils.free_cuda_memory()
+        self._log_cuda_memory("After editing cleanup")
         
         print("#############################")
         CONSOLE.print("Start Editing: ", style="bold yellow")
@@ -230,101 +248,84 @@ class GaussCtrlPipeline(VanillaPipeline):
         ref_disparity_torch = torch.from_numpy(ref_disparities.copy()).to(torch.float16)
         ref_z0_torch = torch.from_numpy(ref_z0s.copy()).to(torch.float16)
 
-        # Edit images in chunk
-        for idx in range(0, len(self.datamanager.train_data), self.chunk_size): 
-            chunked_data = self.datamanager.train_data[idx: idx+self.chunk_size]
-            
-            indices = [current_data['image_idx'] for current_data in chunked_data]
-            mask_images = [current_data['mask_image'] for current_data in chunked_data if 'mask_image' in current_data.keys()] 
-            unedited_images = [current_data['unedited_image'] for current_data in chunked_data]
-            CONSOLE.print(f"Generating view: {indices}", style="bold yellow")
+        try:
+            # Edit images in chunk
+            for idx in range(0, len(self.datamanager.train_data), self.chunk_size):
+                chunked_data = self.datamanager.train_data[idx: idx+self.chunk_size]
 
-            depth_images = [self.depth2disparity(current_data['depth_image']) for current_data in chunked_data]
-            disparities = np.concatenate(depth_images, axis=0)
-            # create per-chunk tensors on CPU and move to GPU only for the pipe call
-            disparities_torch = torch.from_numpy(disparities.copy()).to(torch.float16)
+                indices = [current_data['image_idx'] for current_data in chunked_data]
+                mask_images = [current_data['mask_image'] for current_data in chunked_data if 'mask_image' in current_data.keys()]
+                unedited_images = [current_data['unedited_image'] for current_data in chunked_data]
+                CONSOLE.print(f"Generating view: {indices}", style="bold yellow")
 
-            z_0_images = [current_data['z_0_image'] for current_data in chunked_data] # list of np array
-            z0s = np.concatenate(z_0_images, axis=0)
-            latents_torch = torch.from_numpy(z0s.copy()).to(torch.float16)
+                depth_images = [self.depth2disparity(current_data['depth_image']) for current_data in chunked_data]
+                disparities = np.concatenate(depth_images, axis=0)
+                disparities_torch = torch.from_numpy(disparities.copy()).to(torch.float16)
 
-            # concatenate on CPU then move the smaller combined tensors to GPU
-            disp_ctrl_chunk = torch.concatenate((ref_disparity_torch, disparities_torch), dim=0).to(self.pipe_device)
-            latents_chunk = torch.concatenate((ref_z0_torch, latents_torch), dim=0).to(self.pipe_device)
+                z_0_images = [current_data['z_0_image'] for current_data in chunked_data] # list of np array
+                z0s = np.concatenate(z_0_images, axis=0)
+                latents_torch = torch.from_numpy(z0s.copy()).to(torch.float16)
 
-            # make sure CUDA has room before calling the pipe
-            try:
+                disp_ctrl_cpu = torch.cat((ref_disparity_torch, disparities_torch), dim=0)
+                latents_cpu = torch.cat((ref_z0_torch, latents_torch), dim=0)
+                del disparities_torch, latents_torch
+
                 utils.free_cuda_memory()
-            except Exception:
-                pass
+                self._log_cuda_memory(f"Before diffusion chunk {indices}")
+                CONSOLE.print("Running Stable Diffusion ControlNet Pipeline for this chunk...", style="bold yellow")
 
-            CONSOLE.print("Running Stable Diffusion ControlNet Pipeline for this chunk...", style="bold yellow")
-            
-            # move pipeline to GPU just for this chunk
-            try:
-                self.pipe.to(self.pipe_device)
+                latents_chunk = None
+                disp_ctrl_chunk = None
+                chunk_edited = None
                 try:
-                    self.pipe.enable_attention_slicing()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                    self.pipe.to(self.pipe_device)
+                    try:
+                        self.pipe.enable_attention_slicing()
+                    except Exception:
+                        pass
 
-            chunk_edited = self.pipe(
-                                prompt=[self.positive_prompt] * (self.num_ref_views+len(chunked_data)),
-                                negative_prompt=[self.negative_prompts] * (self.num_ref_views+len(chunked_data)),
-                                latents=latents_chunk,
-                                image=disp_ctrl_chunk,
-                                num_inference_steps=self.num_inference_steps,
-                                guidance_scale=self.guidance_scale,
-                                controlnet_conditioning_scale=self.controlnet_conditioning_scale,
-                                eta=self.eta,
-                                output_type='pt',
-                            ).images[self.num_ref_views:]
-            chunk_edited = chunk_edited.cpu()
+                    disp_ctrl_chunk = disp_ctrl_cpu.to(self.pipe_device)
+                    latents_chunk = latents_cpu.to(self.pipe_device)
 
-            # move pipeline back to CPU to free GPU memory before processing next chunk
-            try:
-                self.pipe.to('cpu')
-            except Exception:
-                pass
+                    chunk_edited = self.pipe(
+                                        prompt=[self.positive_prompt] * (self.num_ref_views+len(chunked_data)),
+                                        negative_prompt=[self.negative_prompts] * (self.num_ref_views+len(chunked_data)),
+                                        latents=latents_chunk,
+                                        image=disp_ctrl_chunk,
+                                        num_inference_steps=self.num_inference_steps,
+                                        guidance_scale=self.guidance_scale,
+                                        controlnet_conditioning_scale=self.controlnet_conditioning_scale,
+                                        eta=self.eta,
+                                        output_type='pt',
+                                    ).images[self.num_ref_views:].cpu()
+                finally:
+                    del latents_chunk, disp_ctrl_chunk
+                    self.pipe.to('cpu')
+                    utils.free_cuda_memory()
+                    self._log_cuda_memory(f"After diffusion chunk {indices}")
 
-            # free intermediate GPU memory for this chunk
-            try:
-                del latents_chunk
-            except Exception:
-                pass
-            try:
-                del disp_ctrl_chunk
-            except Exception:
-                pass
-            try:
-                del latents_torch
-            except Exception:
-                pass
-            try:
-                del disparities_torch
-            except Exception:
-                pass
-            try:
-                del z0s
-            except Exception:
-                pass
+                del disp_ctrl_cpu, latents_cpu, z0s, disparities
+
+                # Insert edited images back to train data for training
+                for local_idx, edited_image in enumerate(chunk_edited):
+                    global_idx = indices[local_idx]
+
+                    bg_cntrl_edited_image = edited_image
+                    if mask_images != []:
+                        mask = torch.from_numpy(mask_images[local_idx])
+                        bg_mask = 1 - mask
+
+                        unedited_image = unedited_images[local_idx].permute(2,0,1)
+                        bg_cntrl_edited_image = edited_image * mask[None] + unedited_image * bg_mask[None]
+
+                    self.datamanager.train_data[global_idx]["image"] = bg_cntrl_edited_image.permute(1,2,0).to(torch.float32) # [512 512 3]
+                del chunk_edited
+        finally:
+            self.pipe.to('cpu')
+            if model_offloaded:
+                self._model.to(self.device)
             utils.free_cuda_memory()
-
-            # Insert edited images back to train data for training
-            for local_idx, edited_image in enumerate(chunk_edited):
-                global_idx = indices[local_idx]
-
-                bg_cntrl_edited_image = edited_image
-                if mask_images != []:
-                    mask = torch.from_numpy(mask_images[local_idx])
-                    bg_mask = 1 - mask
-
-                    unedited_image = unedited_images[local_idx].permute(2,0,1)
-                    bg_cntrl_edited_image = edited_image * mask[None] + unedited_image * bg_mask[None] 
-
-                self.datamanager.train_data[global_idx]["image"] = bg_cntrl_edited_image.permute(1,2,0).to(torch.float32) # [512 512 3]
+            self._log_cuda_memory("After edit_images cleanup")
         print("#############################")
         CONSOLE.print("Done Editing", style="bold yellow")
         print("#############################")

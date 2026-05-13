@@ -74,7 +74,7 @@ def chunked_attention(attn_module, query, key, value, attention_mask=None, chunk
     return out
 
 
-def compute_attn(attn, query, key, value, video_length, ref_frame_index, attention_mask):
+def compute_attn(attn, query, key, value, video_length, ref_frame_index, attention_mask, chunk_size):
     key_ref_cross = rearrange(key, "(b f) d c -> b f d c", f=video_length)
     key_ref_cross = key_ref_cross[:, ref_frame_index]
     key_ref_cross = rearrange(key_ref_cross, "b f d c -> (b f) d c")
@@ -86,7 +86,9 @@ def compute_attn(attn, query, key, value, video_length, ref_frame_index, attenti
     value_ref_cross = attn.head_to_batch_dim(value_ref_cross)
 
     # Use chunked attention to avoid materialising the full attention matrix.
-    hidden_states_ref_cross = chunked_attention(attn, query, key_ref_cross, value_ref_cross, attention_mask)
+    hidden_states_ref_cross = chunked_attention(
+        attn, query, key_ref_cross, value_ref_cross, attention_mask, chunk_size=chunk_size
+    )
 
     # Eagerly free the per-ref key/value to keep peak memory low.
     del key_ref_cross, value_ref_cross
@@ -94,9 +96,10 @@ def compute_attn(attn, query, key, value, video_length, ref_frame_index, attenti
 
 
 class CrossViewAttnProcessor:
-    def __init__(self, self_attn_coeff, unet_chunk_size=2):
+    def __init__(self, self_attn_coeff, unet_chunk_size=2, attention_chunk_size=256):
         self.unet_chunk_size = unet_chunk_size
         self.self_attn_coeff = self_attn_coeff
+        self.attention_chunk_size = attention_chunk_size
 
     def __call__(
             self,
@@ -146,7 +149,9 @@ class CrossViewAttnProcessor:
             # on GPUs with ≤ 12 GB when S = 4096 (64×64 spatial) and batch > ~32.
             key_self  = attn.head_to_batch_dim(key)
             value_self = attn.head_to_batch_dim(value)
-            hidden_states_self = chunked_attention(attn, query, key_self, value_self, attention_mask)
+            hidden_states_self = chunked_attention(
+                attn, query, key_self, value_self, attention_mask, chunk_size=self.attention_chunk_size
+            )
             del key_self, value_self
 
             video_length = key.size()[0] // self.unet_chunk_size
@@ -162,7 +167,9 @@ class CrossViewAttnProcessor:
             cross_sum = torch.zeros_like(hidden_states_self)
 
             for ref_indices in [ref0_frame_index, ref1_frame_index, ref2_frame_index]:
-                h = compute_attn(attn, query, key, value, video_length, ref_indices, attention_mask)
+                h = compute_attn(
+                    attn, query, key, value, video_length, ref_indices, attention_mask, self.attention_chunk_size
+                )
                 cross_sum.add_(h)
                 del h
 
@@ -177,12 +184,11 @@ class CrossViewAttnProcessor:
             key_r3   = attn.head_to_batch_dim(key_r3)
             value_r3 = attn.head_to_batch_dim(value_r3)
 
-        key   = attn.head_to_batch_dim(key)
-        value = attn.head_to_batch_dim(value)
-
         if not is_cross_attention:
             # Use chunked attention for ref3 as well
-            hidden_states_ref3 = chunked_attention(attn, query, key_r3, value_r3, attention_mask)
+            hidden_states_ref3 = chunked_attention(
+                attn, query, key_r3, value_r3, attention_mask, chunk_size=self.attention_chunk_size
+            )
             del key_r3, value_r3
             cross_sum.add_(hidden_states_ref3)
             del hidden_states_ref3
@@ -190,14 +196,17 @@ class CrossViewAttnProcessor:
             cross_mean = cross_sum.div_(4.0)  # in-place to avoid extra allocation
             del cross_sum
 
-            hidden_states = (
-                self.self_attn_coeff * hidden_states_self
-                + (1.0 - self.self_attn_coeff) * cross_mean
-            )
+            hidden_states_self.mul_(self.self_attn_coeff)
+            hidden_states = hidden_states_self.add_(cross_mean, alpha=1.0 - self.self_attn_coeff)
             del hidden_states_self, cross_mean
         else:
             # Cross-attention: single chunked attention against encoder hidden states
-            hidden_states = chunked_attention(attn, query, key, value, attention_mask)
+            key = attn.head_to_batch_dim(key)
+            value = attn.head_to_batch_dim(value)
+            hidden_states = chunked_attention(
+                attn, query, key, value, attention_mask, chunk_size=self.attention_chunk_size
+            )
+            del key, value
 
         hidden_states = attn.batch_to_head_dim(hidden_states)
 
@@ -217,7 +226,19 @@ class CrossViewAttnProcessor:
         return hidden_states
 
 
-def free_cuda_memory():
+def cuda_memory_summary(prefix="CUDA"):
+    if not torch.cuda.is_available():
+        return f"{prefix}: CUDA unavailable"
+    allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+    free, total = torch.cuda.mem_get_info()
+    return (
+        f"{prefix}: allocated={allocated:.2f} GiB, reserved={reserved:.2f} GiB, "
+        f"free={free / (1024 ** 3):.2f} GiB, total={total / (1024 ** 3):.2f} GiB"
+    )
+
+
+def free_cuda_memory(verbose=False):
     """Try to free CUDA memory: collect garbage and empty the CUDA cache.
 
     Call this after deleting large model or tensor references in the caller.
@@ -225,19 +246,25 @@ def free_cuda_memory():
     """
     try:
         gc.collect()
-        print("Called gc.collect() to free memory.")
+        if verbose:
+            print("Called gc.collect() to free memory.", flush=True)
     except Exception:
-        print("Warning: gc.collect() failed, memory may not be freed.")
+        if verbose:
+            print("Warning: gc.collect() failed, memory may not be freed.", flush=True)
         pass
     try:
         torch.cuda.empty_cache()
-        print("Called torch.cuda.empty_cache() to free memory.")
+        if verbose:
+            print("Called torch.cuda.empty_cache() to free memory.", flush=True)
     except Exception:
-        print("Warning: torch.cuda.empty_cache() failed.")
+        if verbose:
+            print("Warning: torch.cuda.empty_cache() failed.", flush=True)
         pass
     try:
         torch.cuda.reset_peak_memory_stats()
-        print("Called torch.cuda.reset_peak_memory_stats() to free memory.")
+        if verbose:
+            print("Called torch.cuda.reset_peak_memory_stats() to free memory.", flush=True)
     except Exception:
-        print("Warning: torch.cuda.reset_peak_memory_stats() failed.")
+        if verbose:
+            print("Warning: torch.cuda.reset_peak_memory_stats() failed.", flush=True)
         pass
