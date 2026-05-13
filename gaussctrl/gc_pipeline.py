@@ -65,8 +65,8 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """Classifier Free Guidance"""
     num_inference_steps: int = 20
     """Inference steps"""
-    chunk_size: int = 5
-    """Batch size for image editing, feel free to reduce to fit your GPU"""
+    chunk_size: int = 1
+    """Batch size for image editing. Keep at 1 for GPUs with ≤ 12 GB VRAM."""
     ref_view_num: int = 4
     """Number of reference frames"""
     diffusion_ckpt: str = 'CompVis/stable-diffusion-v1-4'
@@ -98,19 +98,34 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.ddim_inverser = DDIMInverseScheduler.from_pretrained(self.config.diffusion_ckpt, subfolder="scheduler")
         
         controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-depth")
-        self.pipe = StableDiffusionControlNetPipeline.from_pretrained(self.config.diffusion_ckpt, controlnet=controlnet).to(self.device).to(torch.float16)
+        self.pipe = StableDiffusionControlNetPipeline.from_pretrained(
+            self.config.diffusion_ckpt, controlnet=controlnet
+        ).to(self.device).to(torch.float16)
         self.pipe.to(self.pipe_device)
 
-        # Memory-saving options: slice attention and attempt CPU offload if available
+        # Attention slicing reduces peak VRAM for the VAE encoder/decoder.
+        # NOTE: do NOT call enable_model_cpu_offload() here — it installs
+        #       device-move hooks that conflict with the manual .to('cpu') /
+        #       .to(device) calls used in edit_images() and render_reverse().
+        #       Mixing both causes memory to increase, not decrease.
         try:
             self.pipe.enable_attention_slicing()
         except Exception:
             pass
+
+        # Use xformers memory-efficient attention for the VAE and any attention
+        # layers that are NOT overridden by CrossViewAttnProcessor (e.g. the
+        # text encoder cross-attention in the UNet).  This is a no-op if
+        # xformers is not installed.
         try:
-            # requires accelerate; wrapped in try/except to be safe
-            self.pipe.enable_model_cpu_offload()
+            self.pipe.enable_xformers_memory_efficient_attention()
+            CONSOLE.print("xformers memory-efficient attention enabled.", style="bold green")
         except Exception:
-            pass
+            CONSOLE.print(
+                "xformers not available — using chunked attention fallback. "
+                "Install xformers for extra speed: pip install xformers",
+                style="bold yellow",
+            )
 
         added_prompt = 'best quality, extremely detailed'
         self.positive_prompt = self.edit_prompt + ', ' + added_prompt
@@ -187,6 +202,13 @@ class GaussCtrlPipeline(VanillaPipeline):
             utils.free_cuda_memory()
         except Exception:
             pass
+
+        # Move the heavy pipeline modules to CPU and only load to GPU per-chunk
+        try:
+            self.pipe.to('cpu')
+            utils.free_cuda_memory()
+        except Exception:
+            pass
         
         print("#############################")
         CONSOLE.print("Start Editing: ", style="bold yellow")
@@ -234,7 +256,19 @@ class GaussCtrlPipeline(VanillaPipeline):
                 utils.free_cuda_memory()
             except Exception:
                 pass
+
+            CONSOLE.print("Running Stable Diffusion ControlNet Pipeline for this chunk...", style="bold yellow")
             
+            # move pipeline to GPU just for this chunk
+            try:
+                self.pipe.to(self.pipe_device)
+                try:
+                    self.pipe.enable_attention_slicing()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
             chunk_edited = self.pipe(
                                 prompt=[self.positive_prompt] * (self.num_ref_views+len(chunked_data)),
                                 negative_prompt=[self.negative_prompts] * (self.num_ref_views+len(chunked_data)),
@@ -248,7 +282,13 @@ class GaussCtrlPipeline(VanillaPipeline):
                             ).images[self.num_ref_views:]
             chunk_edited = chunk_edited.cpu()
 
-            # free intermediate GPU memory for this chunk (caller should del large objects first)
+            # move pipeline back to CPU to free GPU memory before processing next chunk
+            try:
+                self.pipe.to('cpu')
+            except Exception:
+                pass
+
+            # free intermediate GPU memory for this chunk
             try:
                 del latents_chunk
             except Exception:
