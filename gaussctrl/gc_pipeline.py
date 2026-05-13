@@ -71,6 +71,8 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """Query-token chunk size for custom attention. Lower uses less VRAM but is slower."""
     offload_model_during_edit: bool = True
     """Move the Gaussian model to CPU while Stable Diffusion edits images."""
+    unload_diffusion_after_edit: bool = True
+    """Delete the diffusion pipeline after editing to free VRAM before Gaussian training."""
     ref_view_num: int = 4
     """Number of reference frames"""
     diffusion_ckpt: str = 'CompVis/stable-diffusion-v1-4'
@@ -221,7 +223,6 @@ class GaussCtrlPipeline(VanillaPipeline):
 
         # Stable Diffusion does all editing work here; the Gaussian model can
         # leave CUDA until training resumes.
-        self.pipe.to('cpu')
         model_offloaded = False
         if self.config.offload_model_during_edit:
             self._model.to('cpu')
@@ -300,7 +301,6 @@ class GaussCtrlPipeline(VanillaPipeline):
                                     ).images[self.num_ref_views:].cpu()
                 finally:
                     del latents_chunk, disp_ctrl_chunk
-                    self.pipe.to('cpu')
                     utils.free_cuda_memory()
                     self._log_cuda_memory(f"After diffusion chunk {indices}")
 
@@ -321,7 +321,8 @@ class GaussCtrlPipeline(VanillaPipeline):
                     self.datamanager.train_data[global_idx]["image"] = bg_cntrl_edited_image.permute(1,2,0).to(torch.float32) # [512 512 3]
                 del chunk_edited
         finally:
-            self.pipe.to('cpu')
+            if self.config.unload_diffusion_after_edit:
+                del self.pipe
             if model_offloaded:
                 self._model.to(self.device)
             utils.free_cuda_memory()

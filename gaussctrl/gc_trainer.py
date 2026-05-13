@@ -46,6 +46,8 @@ class GaussCtrlTrainerConfig(TrainerConfig):
     _target: Type = field(default_factory=lambda: GaussCtrlTrainer)
     steps_per_save: int = 500
     """Number of steps between saves."""
+    skip_viewer_for_quit_on_completion: bool = True
+    """Do not launch the live viewer for one-shot runs that quit when training completes."""
 
 class GaussCtrlTrainer(Trainer):
     """Trainer for GaussCtrl"""
@@ -95,7 +97,10 @@ class GaussCtrlTrainer(Trainer):
         # set up viewer if enabled
         viewer_log_path = self.base_dir / self.config.viewer.relative_log_filename
         self.viewer_state, banner_messages = None, None
-        if self.config.is_viewer_legacy_enabled() and self.local_rank == 0:
+        launch_viewer = not (
+            self.config.skip_viewer_for_quit_on_completion and self.config.viewer.quit_on_train_completion
+        )
+        if self.config.is_viewer_legacy_enabled() and self.local_rank == 0 and launch_viewer:
             datapath = self.config.data
             if datapath is None:
                 datapath = self.base_dir
@@ -108,7 +113,7 @@ class GaussCtrlTrainer(Trainer):
                 train_lock=self.train_lock,
             )
             banner_messages = [f"Legacy viewer at: {self.viewer_state.viewer_url}"]
-        if self.config.is_viewer_enabled() and self.local_rank == 0:
+        if self.config.is_viewer_enabled() and self.local_rank == 0 and launch_viewer:
             datapath = self.config.data
             if datapath is None:
                 datapath = self.base_dir
