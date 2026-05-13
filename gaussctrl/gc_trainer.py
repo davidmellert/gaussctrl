@@ -201,7 +201,8 @@ class GaussCtrlTrainer(Trainer):
             self.base_dir / "dataparser_transforms.json"
         )
         
-        self._init_viewer_state()
+        if self.viewer_state is not None:
+            self._init_viewer_state()
         with TimeWriter(writer, EventName.TOTAL_TRAIN_TIME):
             num_iterations = self.pipeline.config.render_rate
             for step in range(self._start_step, self._start_step + num_iterations):
@@ -226,7 +227,8 @@ class GaussCtrlTrainer(Trainer):
                                 step, location=TrainingCallbackLocation.AFTER_TRAIN_ITERATION
                             )
 
-                self._update_viewer_state(step)
+                if self.viewer_state is not None:
+                    self._update_viewer_state(step)
 
                 # a batch of train rays
                 if step_check(step, self.config.logging.steps_per_log, run_at_zero=True):
@@ -271,7 +273,7 @@ class GaussCtrlTrainer(Trainer):
         for callback in self.callbacks:
             callback.run_callback_at_location(step=step, location=TrainingCallbackLocation.AFTER_TRAIN)
 
-        if not self.config.viewer.quit_on_train_completion:
+        if self.viewer_state is not None and not self.config.viewer.quit_on_train_completion:
             self._train_complete_viewer()
 
     @profiler.time_function
