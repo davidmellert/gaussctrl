@@ -77,22 +77,23 @@ class GaussCtrlModel(SplatfactoModel):
             print("Called get_outputs with not a camera")
             return {}
         assert camera.shape[0] == 1, "Only one camera at a time"
+        model_device = self.means.device
         
         # get the background color
         if self.training:
             if self.config.background_color == "random":
-                background = torch.rand(3, device=self.device)
+                background = torch.rand(3, device=model_device)
             elif self.config.background_color == "white":
-                background = torch.ones(3, device=self.device)
+                background = torch.ones(3, device=model_device)
             elif self.config.background_color == "black":
-                background = torch.zeros(3, device=self.device)
+                background = torch.zeros(3, device=model_device)
             else:
-                background = self.background_color.to(self.device)
+                background = self.background_color.to(model_device)
         else:
             if renderers.BACKGROUND_COLOR_OVERRIDE is not None:
-                background = renderers.BACKGROUND_COLOR_OVERRIDE.to(self.device)
+                background = renderers.BACKGROUND_COLOR_OVERRIDE.to(model_device)
             else:
-                background = self.background_color.to(self.device)
+                background = self.background_color.to(model_device)
 
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
@@ -228,7 +229,7 @@ class GaussCtrlModel(SplatfactoModel):
         was_training = self.training
         self.training = False
         try:
-            outs = self.get_outputs(camera.to(self.device))
+            outs = self.get_outputs(camera.to(self.means.device))
         finally:
             self.training = was_training
         return outs  # type: ignore

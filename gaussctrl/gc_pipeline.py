@@ -160,8 +160,6 @@ class GaussCtrlPipeline(VanillaPipeline):
 
     def _move_gaussian_model(self, device) -> None:
         self._model.to(device)
-        if hasattr(self._model, "device"):
-            self._model.device = torch.device(device)
 
     def render_reverse(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
