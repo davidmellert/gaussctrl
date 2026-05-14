@@ -27,6 +27,7 @@ import mediapy as media
 from lang_sam import LangSAM
 
 import torch, random
+import torch.nn.functional as F
 from torch.cuda.amp.grad_scaler import GradScaler
 from typing_extensions import Literal
 from nerfstudio.pipelines.base_pipeline import VanillaPipeline, VanillaPipelineConfig
@@ -191,6 +192,27 @@ class GaussCtrlPipeline(VanillaPipeline):
             return image
         return (image * 255.0).round().astype(np.uint8)
 
+    @staticmethod
+    def _resize_chw_image(image: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        if image.shape[-2:] == (height, width):
+            return image
+        return F.interpolate(
+            image.unsqueeze(0),
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+    @staticmethod
+    def _resize_hw_mask(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        if mask.shape[-2:] == (height, width):
+            return mask
+        return F.interpolate(
+            mask[None, None].to(torch.float32),
+            size=(height, width),
+            mode="nearest",
+        ).squeeze(0).squeeze(0)
+
     def _save_edit_outputs(self, image_idx: int, unedited_image, edited_image) -> None:
         if not (self.config.save_edited_views or self.config.save_edit_comparisons):
             return
@@ -207,6 +229,13 @@ class GaussCtrlPipeline(VanillaPipeline):
             comparison_dir = output_dir / "comparison"
             comparison_dir.mkdir(parents=True, exist_ok=True)
             unedited_np = self._image_tensor_to_numpy_uint8(unedited_image)
+            if edited_np.shape[:2] != unedited_np.shape[:2]:
+                edited_np = np.asarray(
+                    Image.fromarray(edited_np).resize(
+                        (unedited_np.shape[1], unedited_np.shape[0]),
+                        resample=Image.BILINEAR,
+                    )
+                )
             comparison_np = np.concatenate([unedited_np, edited_np], axis=1)
             media.write_image(comparison_dir / f"frame_{image_idx:05d}.png", comparison_np, fmt="png")
 
@@ -361,16 +390,20 @@ class GaussCtrlPipeline(VanillaPipeline):
                 # Insert edited images back to train data for training
                 for local_idx, edited_image in enumerate(chunk_edited):
                     global_idx = indices[local_idx]
+                    unedited_image_hwc = unedited_images[local_idx]
+                    target_height, target_width = unedited_image_hwc.shape[:2]
+                    edited_image = self._resize_chw_image(edited_image, target_height, target_width)
 
                     bg_cntrl_edited_image = edited_image
                     if mask_images != []:
                         mask = torch.from_numpy(mask_images[local_idx])
+                        mask = self._resize_hw_mask(mask, target_height, target_width)
                         bg_mask = 1 - mask
 
-                        unedited_image = unedited_images[local_idx].permute(2,0,1)
+                        unedited_image = unedited_image_hwc.permute(2,0,1)
                         bg_cntrl_edited_image = edited_image * mask[None] + unedited_image * bg_mask[None]
 
-                    self._save_edit_outputs(global_idx, unedited_images[local_idx], bg_cntrl_edited_image)
+                    self._save_edit_outputs(global_idx, unedited_image_hwc, bg_cntrl_edited_image)
                     self.datamanager.train_data[global_idx]["image"] = bg_cntrl_edited_image.permute(1,2,0).to(torch.float32) # [512 512 3]
                 del chunk_edited
         finally:
