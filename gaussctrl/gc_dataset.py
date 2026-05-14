@@ -78,13 +78,13 @@ class GCDataset(InputDataset):
 
     def __init__(self, dataparser_outputs: DataparserOutputs, scale_factor: float = 1.0):
         super().__init__(dataparser_outputs, scale_factor)
-        if 'depth_filenames' in self.metadata.keys():
+        if self.metadata.get('depth_filenames') is not None:
             self.depth_filenames = self.metadata["depth_filenames"]
-        if 'z_0_filenames' in self.metadata.keys():
+        if self.metadata.get('z_0_filenames') is not None:
             self.z_0_filenames = self.metadata["z_0_filenames"]
-        if 'unedited_image_filenames' in self.metadata.keys():
+        if self.metadata.get('unedited_image_filenames') is not None:
             self.unedited_image_filenames = self.metadata["unedited_image_filenames"]
-        if 'mask_filenames' in self.metadata.keys():
+        if self.metadata.get('mask_filenames') is not None:
             self.mask_filenames = self.metadata["mask_filenames"]
 
     def get_data(self, image_idx: int, image_type: Literal["uint8", "float32"] = "float32") -> Dict:
@@ -112,7 +112,7 @@ class GCDataset(InputDataset):
         Args:
             image_idx: The image index in the dataset.
         """
-        image_filename = self._dataparser_outputs.metadata['unedited_image_filenames'][image_idx]
+        image_filename = self.unedited_image_filenames[image_idx]
         pil_image = Image.open(image_filename)
         if self.scale_factor != 1.0:
             width, height = pil_image.size
@@ -131,26 +131,26 @@ class GCDataset(InputDataset):
         height = int(self._dataparser_outputs.cameras.height[data["image_idx"]])
         width = int(self._dataparser_outputs.cameras.width[data["image_idx"]])
         
-        if 'depth_filenames' in self.metadata.keys():
+        if hasattr(self, 'depth_filenames'):
             depth_filepath = self.depth_filenames[data["image_idx"]]
             # Scale depth images to meter units and also by scaling applied to cameras
             depth_image = get_depth_z_0_image_from_path(
                 filepath=depth_filepath, height=height, width=width, scale_factor=1, read_type='depth'
             )
             meta["depth_image"] = depth_image
-        if 'z_0_filenames' in self.metadata.keys():
+        if hasattr(self, 'z_0_filenames'):
             z_0_filepath = self.z_0_filenames[data["image_idx"]]
             z_0_image = get_depth_z_0_image_from_path(
                 filepath=z_0_filepath, height=height, width=width, scale_factor=1, read_type='z_0'
             )
             meta["z_0_image"] = z_0_image
-        if 'mask_filenames' in self.metadata.keys():
+        if hasattr(self, 'mask_filenames'):
             mask_filepath = self.mask_filenames[data["image_idx"]]
             mask_image = get_depth_z_0_image_from_path(
                 filepath=mask_filepath, height=height, width=width, scale_factor=1, read_type='mask'
             ) # boolean
             meta["mask_image"] = mask_image
-        if 'unedited_image_filenames' in self.metadata.keys():
+        if hasattr(self, 'unedited_image_filenames'):
             unedited_image = self.get_unedited_numpy_image(data["image_idx"])
             unedited_image = torch.from_numpy(unedited_image.astype("float32") / 255.0) 
             meta["unedited_image"] = unedited_image 

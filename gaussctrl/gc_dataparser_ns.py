@@ -494,6 +494,7 @@ class GaussCtrlDataParser(DataParser):
         )
 
         outputs = colmap_config.setup().get_dataparser_outputs(split=split)
+        outputs.metadata = {key: value for key, value in outputs.metadata.items() if value is not None}
         outputs.metadata.update(self._gaussctrl_cached_metadata(len(outputs.image_filenames)))
         if self.downscale_factor is None and self.config.downscale_factor is None:
             self.downscale_factor = getattr(colmap_config, "downscale_factor", None)
