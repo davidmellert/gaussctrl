@@ -90,6 +90,7 @@ class GaussCtrlTrainer(Trainer):
             local_rank=self.local_rank,
             grad_scaler=self.grad_scaler,
         )
+        self.pipeline.edit_output_root = self.base_dir
         self.optimizers = self.setup_optimizers()
         self._load_checkpoint()
         self._move_optimizer_state(torch.device("cpu"))

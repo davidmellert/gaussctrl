@@ -17,6 +17,7 @@
 import os
 from dataclasses import dataclass, field
 from itertools import cycle
+from pathlib import Path
 from typing import Optional, Type, List
 from rich.progress import Console
 from copy import deepcopy
@@ -77,6 +78,12 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """Number of reference frames"""
     diffusion_ckpt: str = 'CompVis/stable-diffusion-v1-4'
     """Diffusion checkpoints"""
+    save_edited_views: bool = False
+    """Save each edited training view as an image."""
+    save_edit_comparisons: bool = False
+    """Save side-by-side original and edited view images."""
+    edited_views_output_dir: Path = Path("edited_views")
+    """Directory for saved edited views. Relative paths are resolved inside the run output directory."""
     
 
 class GaussCtrlPipeline(VanillaPipeline):
@@ -151,6 +158,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.controlnet_conditioning_scale = 1.0
         self.eta = 0.0
         self.chunk_size = self.config.chunk_size
+        self.edit_output_root: Optional[Path] = None
 
     def _log_cuda_memory(self, prefix: str) -> None:
         try:
@@ -160,6 +168,47 @@ class GaussCtrlPipeline(VanillaPipeline):
 
     def _move_gaussian_model(self, device) -> None:
         self._model.to(device)
+
+    def _resolve_edited_views_output_dir(self) -> Path:
+        output_dir = self.config.edited_views_output_dir
+        if not output_dir.is_absolute() and self.edit_output_root is not None:
+            output_dir = self.edit_output_root / output_dir
+        return output_dir
+
+    def _image_tensor_to_numpy_uint8(self, image) -> np.ndarray:
+        if torch.is_tensor(image):
+            image = image.detach().cpu()
+            if image.ndim == 3 and image.shape[0] in (1, 3, 4):
+                image = image.permute(1, 2, 0)
+            image = image.to(torch.float32).clamp(0.0, 1.0).numpy()
+        else:
+            image = np.asarray(image)
+            if image.dtype != np.uint8:
+                image = np.clip(image, 0.0, 1.0)
+        if image.shape[-1] == 4:
+            image = image[..., :3]
+        if image.dtype == np.uint8:
+            return image
+        return (image * 255.0).round().astype(np.uint8)
+
+    def _save_edit_outputs(self, image_idx: int, unedited_image, edited_image) -> None:
+        if not (self.config.save_edited_views or self.config.save_edit_comparisons):
+            return
+
+        output_dir = self._resolve_edited_views_output_dir()
+        edited_np = self._image_tensor_to_numpy_uint8(edited_image)
+
+        if self.config.save_edited_views:
+            edited_dir = output_dir / "edited"
+            edited_dir.mkdir(parents=True, exist_ok=True)
+            media.write_image(edited_dir / f"frame_{image_idx:05d}.png", edited_np, fmt="png")
+
+        if self.config.save_edit_comparisons:
+            comparison_dir = output_dir / "comparison"
+            comparison_dir.mkdir(parents=True, exist_ok=True)
+            unedited_np = self._image_tensor_to_numpy_uint8(unedited_image)
+            comparison_np = np.concatenate([unedited_np, edited_np], axis=1)
+            media.write_image(comparison_dir / f"frame_{image_idx:05d}.png", comparison_np, fmt="png")
 
     def render_reverse(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
@@ -321,6 +370,7 @@ class GaussCtrlPipeline(VanillaPipeline):
                         unedited_image = unedited_images[local_idx].permute(2,0,1)
                         bg_cntrl_edited_image = edited_image * mask[None] + unedited_image * bg_mask[None]
 
+                    self._save_edit_outputs(global_idx, unedited_images[local_idx], bg_cntrl_edited_image)
                     self.datamanager.train_data[global_idx]["image"] = bg_cntrl_edited_image.permute(1,2,0).to(torch.float32) # [512 512 3]
                 del chunk_edited
         finally:
