@@ -15,7 +15,7 @@
 """Data parser for nerfstudio dataset"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Type
 
@@ -85,6 +85,12 @@ class GaussCtrlDataParserConfig(DataParserConfig):
     """The interval between frames to use for eval. Only used when eval_mode is eval-interval."""
     depth_unit_scale_factor: float = 1e-3
     """Scales the depth values to meters. Default value is 0.001 for a millimeter to meter conversion."""
+    load_mask: bool = True
+    """Whether to load cached GaussCtrl mask files when a mask_npy directory exists."""
+    colmap_path: Path = Path("colmap/sparse/0")
+    """Relative path to the COLMAP reconstruction when loading raw COLMAP data."""
+    images_path: Path = Path("images")
+    """Relative path to the input images when loading raw COLMAP data."""
 
 @dataclass
 class GaussCtrlDataParser(DataParser):
@@ -106,6 +112,9 @@ class GaussCtrlDataParser(DataParser):
     def _generate_dataparser_outputs(self, split="train"):
         '''load data to train from the sample trajectory''' 
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
+
+        if self._is_raw_colmap_dataset():
+            return self._generate_colmap_dataparser_outputs(split)
 
         if self.config.data.suffix == ".json":
             meta = load_from_json(self.config.data)
@@ -432,6 +441,82 @@ class GaussCtrlDataParser(DataParser):
         )
 
         return dataparser_outputs
+
+    def _is_raw_colmap_dataset(self) -> bool:
+        """Detect a Nerfstudio `colmap` dataset that has not been converted to transforms.json."""
+        if self.config.data.suffix == ".json" or (self.config.data / "transforms.json").exists():
+            return False
+
+        for sparse_dir in self._colmap_sparse_candidates():
+            if sparse_dir.exists() and (
+                (sparse_dir / "cameras.bin").exists()
+                or (sparse_dir / "cameras.txt").exists()
+            ):
+                return True
+        return False
+
+    def _colmap_sparse_candidates(self):
+        colmap_path = self.config.colmap_path
+        yield self.config.data / colmap_path
+        if colmap_path != Path("sparse/0"):
+            yield self.config.data / "sparse/0"
+
+    def _generate_colmap_dataparser_outputs(self, split="train"):
+        """Load raw COLMAP data through Nerfstudio's Colmap parser, then add GaussCtrl metadata."""
+        try:
+            from nerfstudio.data.dataparsers.colmap_dataparser import ColmapDataParserConfig
+        except ImportError as err:
+            raise RuntimeError(
+                "This data directory looks like raw COLMAP data, but Nerfstudio's Colmap dataparser "
+                "could not be imported. Install a Nerfstudio version that supports the `colmap` parser, "
+                "or convert the scene with `ns-process-data` so it contains transforms.json."
+            ) from err
+
+        config_kwargs = {
+            "data": self.config.data,
+            "scale_factor": self.config.scale_factor,
+            "downscale_factor": self.config.downscale_factor,
+            "scene_scale": self.config.scene_scale,
+            "orientation_method": self.config.orientation_method,
+            "center_method": self.config.center_method,
+            "auto_scale_poses": self.config.auto_scale_poses,
+            "eval_mode": self.config.eval_mode,
+            "eval_interval": self.config.eval_interval,
+            "train_split_fraction": self.config.train_split_fraction,
+            "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
+            "load_3D_points": self.config.load_3D_points,
+            "colmap_path": self._existing_relative_colmap_path(),
+            "images_path": self.config.images_path,
+        }
+        colmap_config_fields = {field.name for field in fields(ColmapDataParserConfig)}
+        colmap_config = ColmapDataParserConfig(
+            **{key: value for key, value in config_kwargs.items() if key in colmap_config_fields}
+        )
+
+        outputs = colmap_config.setup().get_dataparser_outputs(split=split)
+        outputs.metadata.update(self._gaussctrl_cached_metadata(len(outputs.image_filenames)))
+        if self.downscale_factor is None and self.config.downscale_factor is None:
+            self.downscale_factor = getattr(colmap_config, "downscale_factor", None)
+        CONSOLE.log("[green]Loaded raw COLMAP dataset through Nerfstudio's Colmap dataparser.")
+        return outputs
+
+    def _existing_relative_colmap_path(self) -> Path:
+        for sparse_dir in self._colmap_sparse_candidates():
+            if sparse_dir.exists():
+                return sparse_dir.relative_to(self.config.data)
+        return self.config.colmap_path
+
+    def _gaussctrl_cached_metadata(self, num_images: int):
+        metadata = {}
+        if os.path.exists(self.data / Path('depth_npy')):
+            metadata['depth_filenames'] = [self.data / Path(f'depth_npy/frame_{idx+1:05d}.npy') for idx in range(num_images)]
+        if os.path.exists(self.data / Path('z_0')):
+            metadata['z_0_filenames'] = [self.data / Path(f'z_0/frame_{idx+1:05d}.npy') for idx in range(num_images)]
+        if os.path.exists(self.data / Path('mask_npy')) and self.config.load_mask:
+            metadata['mask_filenames'] = [self.data / Path(f'mask_npy/frame_{idx+1:05d}.npy') for idx in range(num_images)]
+        if os.path.exists(self.data / Path('unedited')):
+            metadata['unedited_image_filenames'] = [self.data / Path(f'unedited/frame_{idx+1:05d}.jpg') for idx in range(num_images)]
+        return metadata
     
     def _load_3D_points(self, ply_file_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
         """Loads point clouds positions and colors from .ply
