@@ -196,12 +196,13 @@ class GaussCtrlPipeline(VanillaPipeline):
     def _resize_chw_image(image: torch.Tensor, height: int, width: int) -> torch.Tensor:
         if image.shape[-2:] == (height, width):
             return image
+        dtype = image.dtype
         return F.interpolate(
-            image.unsqueeze(0),
+            image.unsqueeze(0).to(torch.float32),
             size=(height, width),
             mode="bilinear",
             align_corners=False,
-        ).squeeze(0)
+        ).squeeze(0).to(dtype)
 
     @staticmethod
     def _resize_hw_mask(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
