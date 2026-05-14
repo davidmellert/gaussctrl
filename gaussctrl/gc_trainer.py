@@ -17,7 +17,7 @@ Code to train GaussCtrl model
 """
 from dataclasses import dataclass, field
 import dataclasses
-from typing import Type, Tuple, Dict, Literal
+from typing import Type, Tuple, Dict, Literal, Optional
 import functools
 import time
 from rich import box, style
@@ -48,6 +48,8 @@ class GaussCtrlTrainerConfig(TrainerConfig):
     """Number of steps between saves."""
     skip_viewer_for_quit_on_completion: bool = True
     """Do not launch the live viewer for one-shot runs that quit when training completes."""
+    downscale_factor: Optional[int] = None
+    """Override the dataparser image downscale factor, matching splatfacto's --downscale-factor convenience flag."""
 
 class GaussCtrlTrainer(Trainer):
     """Trainer for GaussCtrl"""
@@ -75,6 +77,12 @@ class GaussCtrlTrainer(Trainer):
                 'test': loads train/test datasets into memory
                 'inference': does not load any dataset into memory
         """
+        if self.config.downscale_factor is not None:
+            dataparser = self.config.pipeline.datamanager.dataparser
+            if not hasattr(dataparser, "downscale_factor"):
+                raise ValueError("The configured dataparser does not support downscale_factor.")
+            dataparser.downscale_factor = self.config.downscale_factor
+
         self.pipeline = self.config.pipeline.setup(
             device=self.device,
             test_mode=test_mode,
