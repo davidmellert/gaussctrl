@@ -108,6 +108,12 @@ class GaussCtrlDataManager(FullImageDatamanager, Generic[TDataset]):
                 data['image_idx'] = i
                 self.train_data.append(data)
             self.train_unseen_cameras = list(range(self.config.subset_num * self.config.sampled_views_every_subset))
+
+    @staticmethod
+    def _set_camera_resolution_from_image(cameras: Cameras, image_idx: int, image: torch.Tensor) -> None:
+        """Keep camera render size aligned with the image tensor actually used for supervision."""
+        cameras.width[image_idx] = image.shape[1]
+        cameras.height[image_idx] = image.shape[0]
         
     def cache_images(self, cache_images_option):
         cached_train = []
@@ -119,6 +125,7 @@ class GaussCtrlDataManager(FullImageDatamanager, Generic[TDataset]):
             camera = self.train_dataset.cameras[i].reshape(())
             K = camera.get_intrinsics_matrices().numpy()
             if camera.distortion_params is None:
+                self._set_camera_resolution_from_image(self.train_dataset.cameras, i, data["image"])
                 cached_train.append(data)
                 continue
             distortion_params = camera.distortion_params.numpy()
@@ -135,8 +142,7 @@ class GaussCtrlDataManager(FullImageDatamanager, Generic[TDataset]):
             self.train_dataset.cameras.fy[i] = float(K[1, 1])
             self.train_dataset.cameras.cx[i] = float(K[0, 2])
             self.train_dataset.cameras.cy[i] = float(K[1, 2])
-            self.train_dataset.cameras.width[i] = image.shape[1]
-            self.train_dataset.cameras.height[i] = image.shape[0]
+            self._set_camera_resolution_from_image(self.train_dataset.cameras, i, data["image"])
 
         CONSOLE.log("Caching / undistorting eval images")
         for i in tqdm(range(len(self.eval_dataset)), leave=False):
@@ -145,6 +151,7 @@ class GaussCtrlDataManager(FullImageDatamanager, Generic[TDataset]):
             camera = self.eval_dataset.cameras[i].reshape(())
             K = camera.get_intrinsics_matrices().numpy()
             if camera.distortion_params is None:
+                self._set_camera_resolution_from_image(self.eval_dataset.cameras, i, data["image"])
                 cached_eval.append(data)
                 continue
             distortion_params = camera.distortion_params.numpy()
@@ -161,8 +168,7 @@ class GaussCtrlDataManager(FullImageDatamanager, Generic[TDataset]):
             self.eval_dataset.cameras.fy[i] = float(K[1, 1])
             self.eval_dataset.cameras.cx[i] = float(K[0, 2])
             self.eval_dataset.cameras.cy[i] = float(K[1, 2])
-            self.eval_dataset.cameras.width[i] = image.shape[1]
-            self.eval_dataset.cameras.height[i] = image.shape[0]
+            self._set_camera_resolution_from_image(self.eval_dataset.cameras, i, data["image"])
 
         if cache_images_option == "gpu":
             for cache in cached_train:
